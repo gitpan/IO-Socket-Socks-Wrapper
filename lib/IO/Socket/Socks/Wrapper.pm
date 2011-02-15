@@ -4,7 +4,7 @@ use strict;
 use Socket;
 use base 'Exporter';
 
-our $VERSION = 0.01;
+our $VERSION = 0.02;
 our @EXPORT_OK = 'connect';
 
 sub import
@@ -19,18 +19,46 @@ sub import
 		
 		if($module) {
 			# override connect() in the package
-			*connect = sub(*$) {
-				my ($socket, $name) = @_;
-				return _connect($socket, $name, $cfg);
-			};
+			eval "require $module" # make @ISA available
+				or die $@;
+			
+			if($module->isa('IO::Socket::INET')) {
+				# replace IO::Socket::INET::connect
+				# if package inherits from IO::Socket::INET
+				*connect = sub(*$) {
+					local(*IO::Socket::INET::connect) = sub(*$) {
+						_connect(@_, $cfg);
+					};
+					
+					my $self = shift;
+					my $ref = ref($self);
+					no strict 'refs';
+					
+					# get first parent which has connect sub
+					# and call it
+					foreach my $parent (@{$module.'::ISA'}) {
+						if($parent->isa('IO::Socket::INET')) {
+							bless $self, $parent;
+							$self->connect(@_);
+							bless $self, $ref;
+							return $self;
+						}
+					}
+				}
+			}
+			else {
+				# replace package version of connect
+				*connect = sub(*$) {
+					_connect(@_, $cfg);
+				}
+			}
 			
 			$pkg->export($module, 'connect');
 		}
 		else {
 			# override connect() globally
 			*connect = sub(*$) {
-				my ($socket, $name) = @_;
-				return _connect($socket, $name, $cfg);
+				_connect(@_, $cfg);
 			};
 			
 			$pkg->export('CORE::GLOBAL', 'connect');
@@ -49,7 +77,7 @@ sub _connect
 	my ($port, $host) = sockaddr_in($name);
 	$host = inet_ntoa($host);
 	
-	# global overriding will not work with `use' pragma
+	# global overriding will not work with `use'
 	require IO::Socket::Socks;
 	
 	IO::Socket::Socks->new_from_socket(
@@ -73,9 +101,11 @@ IO::Socket::Socks::Wrapper - Allow any perl module to work through a socks proxy
 
 =head1 SYNOPSIS
 
+=over
+
 	# only Net::FTP and Net::HTTP
 	use IO::Socket::Socks::Wrapper (
-		Net::FTP => {
+		Net::FTP => { # `Net::FTP::dataconn' to wrap data connection
 			ProxyAddr => '10.0.0.1',
 			ProxyPort => 1080,
 			SocksDebug => 1
@@ -101,6 +131,10 @@ IO::Socket::Socks::Wrapper - Allow any perl module to work through a socks proxy
 	# change proxy for Net::FTP
 	IO::Socket::Socks::Wrapper->import(Net::FTP:: => {ProxyAddr => '10.0.0.3', ProxyPort => 1080});
 
+=back
+
+=over
+
 	# all modules
 	use IO::Socket::Socks::Wrapper ( # should be before any other `use'
 		{
@@ -114,6 +148,8 @@ IO::Socket::Socks::Wrapper - Allow any perl module to work through a socks proxy
 	# except Net::FTP
 	IO::Socket::Socks::Wrapper->import(Net::FTP:: => 0); # direct network access
 
+=back
+
 =head1 DESCRIPTION
 
 C<IO::Socket::Socks::Wrapper> allows to wrap up the network connections into socks proxy. It can wrap up connection
@@ -124,7 +160,7 @@ or globally.
 
 =head2 import( CFG )
 
-import() is invoked when C<IO::Socket::Socks::Wrapper> loaded by `use' pragma. Later it can be invoked manually
+import() is invoked when C<IO::Socket::Socks::Wrapper> loaded by `use'. Later it can be invoked manually
 to change proxy in some module. Global overriding will not work in modules which was loaded before calling 
 IO::Socket::Socks::Wrapper->import(). So, for this purposes `use IO::Socket::Socks::Wrapper' should be before
 any other uses.
@@ -136,7 +172,9 @@ CFG syntax to wrap up separate modules is:
 	module => $hashref
 
 module is a module which is responsible for connections. For example if you want to wrap LWP http connections, then module
-name should be Net::HTTP.
+name should be Net::HTTP, for https connections it should be Net::HTTPS. You really need to look at the code of the module
+which you want to wrap to determine name for wrapping or use global wrapping which will wrap all that can. Use `SocksDebug' to
+verify that wrapping works good.
 
 For the global wrapping only $hashref should be specified.
 
