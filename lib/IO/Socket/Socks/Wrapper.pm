@@ -1,11 +1,17 @@
 package IO::Socket::Socks::Wrapper;
 
 use strict;
+no warnings 'prototype';
+no warnings 'redefine';
 use Socket;
 use base 'Exporter';
 
-our $VERSION = 0.03;
+our $VERSION = 0.04;
 our @EXPORT_OK = 'connect';
+
+# cache
+# pkg -> ref to pkg::connect || undef(if pkg has no connect)
+my %PKGS;
 
 sub import
 {
@@ -30,32 +36,47 @@ sub import
 					or die $@;
 			}
 			
-			if($pkg->isa('IO::Socket::INET')) {
-				# replace IO::Socket::INET::connect
-				# if package inherits from IO::Socket::INET
-				*connect = sub(*$) {
-					local(*IO::Socket::INET::connect) = sub(*$) {
+			if($pkg->isa('IO::Socket')) {
+			# replace IO::Socket::connect
+			# if package inherits from IO::Socket
+				# save replaceable package version of the connect
+				# if it has own
+				# will call it from the our new connect
+				my $symbol = $pkg.'::connect';
+				my $pkg_connect = exists $PKGS{$pkg} ?
+				                         $PKGS{$pkg} :
+				                         ($PKGS{$pkg} = eval{ *{$symbol}{CODE} } ? \&$symbol : undef);
+				
+				*connect = sub {
+					local(*IO::Socket::connect) = sub {
 						_connect(@_, $cfg);
 					};
 					
 					my $self = shift;
-					my $ref = ref($self);
 					
+					if ($pkg_connect) {
+					# package has its own connect
+						$pkg_connect->($self, @_);
+					}
+					else {
 					# get first parent which has connect sub
 					# and call it
-					foreach my $parent (@{$pkg.'::ISA'}) {
-						if($parent->isa('IO::Socket::INET')) {
-							bless $self, $parent;
-							$self->connect(@_);
-							bless $self, $ref;
-							return $self;
+						my $ref = ref($self);
+						
+						foreach my $parent (@{$pkg.'::ISA'}) {
+							if($parent->isa('IO::Socket')) {
+								bless $self, $parent;
+								$self->connect(@_);
+								bless $self, $ref;
+								return $self;
+							}
 						}
 					}
 				}
 			}
 			else {
 				# replace package version of connect
-				*connect = sub(*$) {
+				*connect = sub {
 					_connect(@_, $cfg);
 				}
 			}
