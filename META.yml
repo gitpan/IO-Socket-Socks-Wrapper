@@ -1,18 +1,17 @@
 --- #YAML:1.0
 name:               IO-Socket-Socks-Wrapper
-version:            0.05
+version:            0.06
 abstract:           Allow any perl package to work through a socks proxy
 author:
     - Oleg G <oleg@cpan.org>
 license:            perl
 distribution_type:  module
 configure_requires:
-    ExtUtils::MakeMaker:  0
+    ExtUtils::MakeMaker:  6.52
 build_requires:
-    ExtUtils::MakeMaker:  0
+    Test::More:  0.88
 requires:
-    IO::Socket::Socks:  0.4
-    Test::More:         0.88
+    IO::Socket::Socks:  0.61
 resources:
     repository:  https://github.com/olegwtf/p5-IO-Socket-Socks-Wrapper
 no_index:
