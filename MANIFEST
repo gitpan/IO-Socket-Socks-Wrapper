@@ -9,4 +9,5 @@ t/2_in_pkg_no_global.t
 t/3_global.t
 t/4_sub.t
 MANIFEST
-META.yml                                 Module meta-data (added by MakeMaker)
+META.yml                                 Module YAML meta-data (added by MakeMaker)
+META.json                                Module JSON meta-data (added by MakeMaker)

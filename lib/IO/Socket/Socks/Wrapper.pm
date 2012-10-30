@@ -6,7 +6,7 @@ no warnings 'redefine';
 use Socket;
 use base 'Exporter';
 
-our $VERSION = 0.06;
+our $VERSION = 0.07;
 our @EXPORT_OK = 'connect';
 
 # cache
@@ -109,7 +109,16 @@ sub import
 		else {
 			# override connect() globally
 			*connect = sub(*$) {
-				_connect(@_, $cfg);
+				my $socket = shift;
+				unless (ref $socket) {
+					# old-style bareword used
+					no strict 'refs';
+					my $caller = caller;
+					$socket = $caller . '::' . $socket;
+					$socket = \*{$socket};
+				}
+				
+				_connect($socket, @_, $cfg);
 			};
 			
 			$mypkg->export('CORE::GLOBAL', 'connect');
@@ -124,7 +133,7 @@ sub _connect
 	
 	return CORE::connect( $socket, $name )
 		if (($ref && $socket->isa('IO::Socket::Socks')) || !$cfg);
-		
+	
 	my ($port, $host) = sockaddr_in($name);
 	$host = inet_ntoa($host);
 	
@@ -142,8 +151,8 @@ sub _connect
 		%$cfg
 	) or return;
 	
-	bless $socket, $ref
-		if $ref && $ref ne 'GLOB';
+	bless $socket, $ref if $ref; # XXX: should we unbless for GLOB?
+	1;
 }
 
 1;
