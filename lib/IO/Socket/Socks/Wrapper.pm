@@ -6,7 +6,7 @@ no warnings 'redefine';
 use Socket;
 use base 'Exporter';
 
-our $VERSION = 0.07;
+our $VERSION = '0.08_1';
 our @EXPORT_OK = 'connect';
 
 # cache
@@ -124,6 +124,11 @@ sub import
 			$mypkg->export('CORE::GLOBAL', 'connect');
 		}
 	}
+}
+
+sub wrap_connection {
+	require IO::Socket::Socks::Wrapped;
+	return  IO::Socket::Socks::Wrapped->new(@_);
 }
 
 sub _connect
