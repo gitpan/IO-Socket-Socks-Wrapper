@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               IO-Socket-Socks-Wrapper
-version:            0.08_2
+version:            0.08_3
 abstract:           Allow any perl package to work through a socks proxy
 author:
     - Oleg G <oleg@cpan.org>
