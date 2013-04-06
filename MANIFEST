@@ -11,5 +11,4 @@ t/4_sub.t
 t/5_obj.t
 t/6_live.t
 t/subs.pm
-META.yml                                 Module YAML meta-data (added by MakeMaker)
-META.json                                Module JSON meta-data (added by MakeMaker)
+META.yml                                 Module meta-data (added by MakeMaker)
