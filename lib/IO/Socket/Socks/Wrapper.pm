@@ -6,7 +6,7 @@ no warnings 'redefine';
 use Socket;
 use base 'Exporter';
 
-our $VERSION = '0.08';
+our $VERSION = '0.09';
 our @EXPORT_OK = ('connect', 'wrap_connection');
 
 # cache
@@ -38,11 +38,9 @@ sub import
 			
 			# override in the package
 			
-			# do not load module with package if package already available
-			# some packages haven't separate modules
-			# so, in this case loading will fail
-			# allow the user to load correct module with needed package
-			unless(%{$pkg.'::'}) {
+			# try to load if not already available
+			# and if not requested to do not load
+			unless(delete $cfg->{_norequire} || %{$pkg.'::'}) {
 				eval "require $pkg" # make @ISA available
 					or die $@;
 			}
@@ -56,7 +54,7 @@ sub import
 				                     ($PKGS{$symbol} = \&$symbol);
 				*$symbol = sub {
 					local *IO::Socket::connect = sub {
-						_connect(@_, $cfg);
+						_connect(@_, $cfg, 1);
 					};
 					
 					$pkg_sub->(@_);
@@ -76,7 +74,7 @@ sub import
 				
 				*connect = sub {
 					local(*IO::Socket::connect) = sub {
-						_connect(@_, $cfg);
+						_connect(@_, $cfg, 1);
 					};
 					
 					my $self = shift;
@@ -93,9 +91,9 @@ sub import
 						foreach my $parent (@{$pkg.'::ISA'}) {
 							if($parent->isa('IO::Socket')) {
 								bless $self, $parent;
-								$self->connect(@_);
+								my $connected = $self->connect(@_);
 								bless $self, $ref;
-								return $self;
+								return $connected ? $self : undef;
 							}
 						}
 					}
@@ -137,11 +135,47 @@ sub wrap_connection {
 
 sub _connect
 {
-	my ($socket, $name, $cfg) = @_;
+	my ($socket, $name, $cfg, $io_socket) = @_;
 	my $ref = ref($socket);
 	
-	return CORE::connect( $socket, $name )
-		if (($ref && $socket->isa('IO::Socket::Socks')) || !$cfg);
+	if (($ref && $socket->isa('IO::Socket::Socks')) || !$cfg) {
+		my $timeout;
+		unless ($io_socket and $timeout = ${*$socket}{'io_socket_timeout'}) {
+			return CORE::connect( $socket, $name );
+		}
+		
+		my $blocking = $socket->blocking(0);
+		my $err;
+		
+		if (!CORE::connect( $socket, $name )) {
+			# this was ported from IO::Socket::connect();
+			if (($!{EINPROGRESS} || $!{EWOULDBLOCK})) {
+				require IO::Select;
+				my $sel = IO::Select->new($socket);
+				
+				undef $!;
+				if (!$sel->can_write($timeout)) {
+					$! = exists &Errno::ETIMEDOUT ? &Errno::ETIMEDOUT : 1 unless $!;
+					$err = $!;
+				}
+				elsif (!CORE::connect( $socket, $name ) &&
+						not ($!{EISCONN} || ($! == 10022 && $^O eq 'MSWin32'))) {
+					# Some systems refuse to re-connect() to
+					# an already open socket and set errno to EISCONN.
+					# Windows sets errno to WSAEINVAL (10022)
+					$err = $!;
+				}
+			}
+			else {
+				$err = $!;
+			}
+		}
+		
+		$socket->blocking(1) if $blocking;
+		$! = $err if $err;
+		
+		return $err ? undef : $socket;
+	}
 	
 	my ($port, $host) = sockaddr_in($name);
 	$host = inet_ntoa($host);
@@ -150,7 +184,7 @@ sub _connect
 	require IO::Socket::Socks;
 	
 	unless (exists $cfg->{Timeout}) {
-		$cfg->{Timeout} = 180;
+		$cfg->{Timeout} = $ref && $socket->isa('IO::Socket') && ${*$socket}{'io_socket_timeout'} || 180;
 	}
 	
 	IO::Socket::Socks->new_from_socket(
@@ -161,7 +195,8 @@ sub _connect
 	) or return;
 	
 	bless $socket, $ref if $ref; # XXX: should we unbless for GLOB?
-	1;
+	
+	return $socket;
 }
 
 1;
@@ -176,15 +211,13 @@ IO::Socket::Socks::Wrapper - Allow any perl package to work through a socks prox
 
 =over
 
-	# wrap all connections
-	use IO::Socket::Socks::Wrapper ( # should be before any other `use'
-		{
-			ProxyAddr => 'localhost',
-			ProxyPort => 1080,
-			SocksDebug => 1,
-			Timeout => 10
-		}
-	);
+	# we can wrap all connections
+	use IO::Socket::Socks::Wrapper { # should be before any other `use'
+		ProxyAddr => 'localhost',
+		ProxyPort => 1080,
+		SocksDebug => 1,
+		Timeout => 10
+	};
 	
 	# except Net::FTP
 	IO::Socket::Socks::Wrapper->import(Net::FTP:: => 0); # direct network access
@@ -193,9 +226,38 @@ IO::Socket::Socks::Wrapper - Allow any perl package to work through a socks prox
 
 =over
 
-	# wrap Net::FTP and Net::HTTP only
+	# we can wrap connection for separate object
+	# if package internally uses IO::Socket for connections (for most this is true)
+	
+	use v5.10;
+	use IO::Socket::Socks::Wrapper 'wrap_connection';
+	use Mojo::UserAgent;
+	
+	my $ua = wrap_connection(Mojo::UserAgent->new, {
+		ProxyAddr => 'localhost',
+		ProxyPort => 1080,
+		SocksDebug => 1
+	});
+	
+	# $ua now uses socks5 proxy for connections
+	say $ua->get('http://www.google.com')->success->code;
+
+=back
+
+=over
+
+	# we can wrap connection for separate packages
+	# if package inherited from IO::Socket
+	# let's wrap Net::FTP and Net::HTTP
+	
 	use IO::Socket::Socks::Wrapper (
-		Net::FTP => { # also specify `Net::FTP::dataconn' to wrap data connection
+		Net::FTP => {
+			ProxyAddr => '10.0.0.1',
+			ProxyPort => 1080,
+			SocksDebug => 1,
+			Timeout => 15
+		},
+		Net::FTP::dataconn => {
 			ProxyAddr => '10.0.0.1',
 			ProxyPort => 1080,
 			SocksDebug => 1,
@@ -211,7 +273,7 @@ IO::Socket::Socks::Wrapper - Allow any perl package to work through a socks prox
 	);
 	use Net::FTP;
 	use Net::POP3;
-	use LWP;
+	use LWP; # it uses Net::HTTP for http connections
 	use strict;
 	
 	my $ftp = Net::FTP->new();       # via socks5://10.0.0.1:1080
@@ -220,23 +282,25 @@ IO::Socket::Socks::Wrapper - Allow any perl package to work through a socks prox
 	
 	...
 	
-	# change proxy for Net::FTP
-	IO::Socket::Socks::Wrapper->import(Net::FTP:: => {ProxyAddr => '10.0.0.3', ProxyPort => 1080});
+	# change proxy for Net::HTTP
+	IO::Socket::Socks::Wrapper->import(Net::HTTP:: => {ProxyAddr => '10.0.0.3', ProxyPort => 1080});
 
 =back
 
 =over
 
-	# more direct LWP::UserAgent wrapping
+	# we can wrap connection for packages that hasn't separate modules
+	# let's make more direct LWP::UserAgent wrapping
 	
 	# we need to associate LWP::Protocol::http::Socket and LWP::Protocol::https::Socket packages
 	# with socks proxy
 	# this packages do not have separate modules
 	# LWP::Protocol::http and LWP::Protocol::https modules includes this packages respectively
 	# IO::Socket::Socks::Wrapper should has access to @ISA of each package which want to be wrapped
-	# when package == module it can load packages automatically and do its magic with @ISA
+	# when package == module it can load packages automatically and do its magic
 	# but in the case like this loading will fail
 	# so, we should load this modules manually
+	
 	use LWP::Protocol::http;
 	use LWP::Protocol::https;
 	use IO::Socket::Socks::Wrapper (
@@ -265,7 +329,7 @@ IO::Socket::Socks::Wrapper - Allow any perl package to work through a socks prox
 
 =over
 
-	# the way to wrap package that is not inherited from IO::Socket
+	# we can wrap packages that is not inherited from IO::Socket
 	# but uses IO::Socket object as internal socket handle
 	
 	use HTTP::Tiny; # HTTP::Tiny::Handle package is in HTTP::Tiny module
@@ -292,21 +356,20 @@ IO::Socket::Socks::Wrapper - Allow any perl package to work through a socks prox
 
 =over
 
-	# we can wrap connection for separate object
-	# if package internally uses IO::Socket for connections (for most this is true)
+	# we can wrap packages that uses bult-in connect()
+	# Net::Telnet for example
 	
-	use v5.10;
-	use IO::Socket::Socks::Wrapper 'wrap_connection';
-	use Mojo::UserAgent;
-
-	my $ua = wrap_connection(Mojo::UserAgent->new, {
-		ProxyAddr => 'localhost',
-		ProxyPort => 1080,
-		SocksDebug => 1
-	});
-
-	# $ua now uses socks5 proxy for connections
-	say $ua->get('http://www.google.com')->success->code;
+	use IO::Socket::Socks::Wrapper (
+		Net::Telnet => {
+			_norequire => 1, # should tell do not load it
+			                 # because buil-in connect should be overrided
+			                 # before package being compiled
+			ProxyAddr => 'localhost',
+			ProxyPort => 1080,
+			SocksDebug => 1
+		}
+	);
+	use Net::Telnet; # and load it after manually
 
 =back
 
@@ -346,6 +409,17 @@ LWP::Protocol::https::Socket respectively (see examples above). You really need 
 which you want to wrap to determine the name for wrapping. Or use global wrapping which will wrap all that can. Use `SocksDebug' to
 verify that wrapping works. For $hashref description see above.
 
+=item Wrapping package that uses built-in connect()
+
+Examples are: Net::Telnet
+
+	'pkg' => $hashref
+
+Syntax is the same as for wrapping package that inherits from IO::Socket except for one point.
+Replacing of built-in connect() should be performed before package being actually loaded. For this purposes you should specify
+C<_norequire> key with true value for $hashref CFG. This will prevent package loading, so you need to require this package manually
+after.
+
 =item Wrapping package that uses IO::Socket object or class object inherited from IO::Socket as internal socket handle
 
 Examples are: HTTP::Tiny (HTTP::Tiny::Handle::connect)
@@ -367,8 +441,11 @@ description see above.
 
 =head1 NOTICE
 
-Default timeout for wrapped connect is 180 sec. You can specify your own value using C<Timeout> option. Set it to zero if you don't want
-to limit connection attempt time.
+Default timeout for wrapped connect is timeout value for socket on which we trying to connect. This timeout value checked only
+for sockets inherited from IO::Socket. For example C<LWP::UserAgent-E<gt>new(timeout =E<gt> 5)> creates socket with timeout 5 sec, so no 
+need to additionally specify timeout for C<IO::Socket::Socks::Wrapper>. If socket timeout not specified or socket not inherited
+from IO::Socket then default timeout will be 180 sec. You can specify your own value using C<Timeout> option. Set it to zero if you
+don't want to limit connection attempt time.
 
 =head1 BUGS
 
