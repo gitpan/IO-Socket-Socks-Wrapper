@@ -36,11 +36,11 @@
          }
       }
    },
-   "release_status" : "testing",
+   "release_status" : "stable",
    "resources" : {
       "repository" : {
          "url" : "https://github.com/olegwtf/p5-IO-Socket-Socks-Wrapper"
       }
    },
-   "version" : "0.10_3"
+   "version" : "0.10"
 }

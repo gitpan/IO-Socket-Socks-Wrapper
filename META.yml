@@ -21,4 +21,4 @@ requires:
   IO::Socket::Socks: 0.61
 resources:
   repository: https://github.com/olegwtf/p5-IO-Socket-Socks-Wrapper
-version: 0.10_3
+version: 0.10
