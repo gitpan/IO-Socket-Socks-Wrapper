@@ -1,4 +1,4 @@
-use 5.006000;
+use 5.010000;
 use ExtUtils::MakeMaker;
 # See lib/ExtUtils/MakeMaker.pm for details of how to influence
 # the contents of the Makefile that is written.
@@ -7,7 +7,7 @@ WriteMakefile(
     LICENSE            => 'perl',
     VERSION_FROM       => 'lib/IO/Socket/Socks/Wrapper.pm',
     PREREQ_PM          => { IO::Socket::Socks => 0.61 }, # e.g., Module::Name => 1.1,
-    BUILD_REQUIRES     => { Test::More => 0.88 },
+    BUILD_REQUIRES     => { Test::More => 0.88, Mojolicious => 4.85, AnyEvent => 0, AnyEvent::HTTP => 0 },
     CONFIGURE_REQUIRES => { 'ExtUtils::MakeMaker' => 6.52 },
     META_MERGE         => { resources => {repository => 'https://github.com/olegwtf/p5-IO-Socket-Socks-Wrapper'} },
     ($] >= 5.005 ?     ## Add these new keywords supported since 5.005

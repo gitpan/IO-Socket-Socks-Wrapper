@@ -4,7 +4,7 @@
       "Oleg G <oleg@cpan.org>"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "ExtUtils::MakeMaker version 6.82, CPAN::Meta::Converter version 2.120351",
+   "generated_by" : "ExtUtils::MakeMaker version 6.98, CPAN::Meta::Converter version 2.120351",
    "license" : [
       "perl_5"
    ],
@@ -22,6 +22,9 @@
    "prereqs" : {
       "build" : {
          "requires" : {
+            "AnyEvent" : "0",
+            "AnyEvent::HTTP" : "0",
+            "Mojolicious" : "4.85",
             "Test::More" : "0.88"
          }
       },
@@ -36,11 +39,11 @@
          }
       }
    },
-   "release_status" : "stable",
+   "release_status" : "testing",
    "resources" : {
       "repository" : {
          "url" : "https://github.com/olegwtf/p5-IO-Socket-Socks-Wrapper"
       }
    },
-   "version" : "0.10"
+   "version" : "0.11_1"
 }

@@ -6,12 +6,30 @@ no warnings 'redefine';
 use Socket;
 use base 'Exporter';
 
-our $VERSION = '0.10';
+our $VERSION = '0.11_1';
 our @EXPORT_OK = ('connect', 'wrap_connection');
 
 # cache
 # pkg -> ref to pkg::sub || undef(if pkg has no connect)
 my %PKGS;
+
+# reference to &IO::Socket::connect
+my $io_socket_connect;
+sub _io_socket_connect_ref {
+	return $io_socket_connect if $io_socket_connect;
+	$io_socket_connect = \&IO::Socket::connect;
+}
+
+# fake handle to put under event loop while making socks handshake
+my ($blocking_reader, $blocking_writer);
+sub _get_blocking_handle {
+	unless ($blocking_reader) {
+		pipe($blocking_reader, $blocking_writer)
+			or die 'pipe(): ', $!;
+	}
+	
+	return $blocking_reader;
+}
 
 sub import
 {
@@ -52,6 +70,9 @@ sub import
 				my $pkg_sub = exists $PKGS{$symbol} ?
 				                     $PKGS{$symbol} :
 				                     ($PKGS{$symbol} = \&$symbol);
+				
+				_io_socket_connect_ref();
+				
 				*$symbol = sub {
 					local *IO::Socket::connect = sub {
 						_connect(@_, $cfg, 1);
@@ -73,6 +94,8 @@ sub import
 				                         ($PKGS{$pkg} = eval{ *{$symbol}{CODE} } ? \&$symbol : undef);
 				
 				*connect = sub {
+					_io_socket_connect_ref();
+					
 					local(*IO::Socket::connect) = sub {
 						_connect(@_, $cfg, 1);
 					};
@@ -139,42 +162,13 @@ sub _connect
 	my $ref = ref($socket);
 	
 	if (($ref && $socket->isa('IO::Socket::Socks')) || !$cfg) {
-		my $timeout;
-		unless ($io_socket and $timeout = ${*$socket}{'io_socket_timeout'}) {
+		unless ($io_socket and ${*$socket}{'io_socket_timeout'}) {
 			return CORE::connect( $socket, $name );
 		}
 		
-		my $blocking = $socket->blocking(0);
-		my $err;
-		
-		if (!CORE::connect( $socket, $name )) {
-			# this was ported from IO::Socket::connect();
-			if (($!{EINPROGRESS} || $!{EWOULDBLOCK})) {
-				require IO::Select;
-				my $sel = IO::Select->new($socket);
-				
-				undef $!;
-				if (!$sel->can_write($timeout)) {
-					$! = exists &Errno::ETIMEDOUT ? &Errno::ETIMEDOUT : 1 unless $!;
-					$err = $!;
-				}
-				elsif (!CORE::connect( $socket, $name ) &&
-						not ($!{EISCONN} || ($! == 10022 && $^O eq 'MSWin32'))) {
-					# Some systems refuse to re-connect() to
-					# an already open socket and set errno to EISCONN.
-					# Windows sets errno to WSAEINVAL (10022)
-					$err = $!;
-				}
-			}
-			else {
-				$err = $!;
-			}
-		}
-		
-		$socket->blocking(1) if $blocking;
-		$! = $err if $err;
-		
-		return $err ? undef : $socket;
+		# use IO::Socket::connect for timeout support
+		local *connect = sub { CORE::connect($_[0], $_[1]) };
+		return _io_socket_connect_ref->( $socket, $name );
 	}
 	
 	my ($port, $host) = sockaddr_in($name);
@@ -182,9 +176,24 @@ sub _connect
 	
 	# global overriding will not work with `use'
 	require IO::Socket::Socks;
+	my $io_handler = $cfg->{_io_handler};
 	
-	unless (exists $cfg->{Timeout}) {
+	unless ($io_handler || exists $cfg->{Timeout}) {
 		$cfg->{Timeout} = $ref && $socket->isa('IO::Socket') && ${*$socket}{'io_socket_timeout'} || 180;
+	}
+	
+	if ($io_handler) {
+		$io_handler = $io_handler->();
+		require POSIX;
+		require Scalar::Util;
+		
+		my $fd = fileno($socket);
+		my $tmp_fd = POSIX::dup($fd) // die 'dup2(): ', $!;
+		open my $tmp_socket, '+<&=' . $tmp_fd or die 'open(): ', $!;
+		POSIX::dup2(fileno(_get_blocking_handle()), $fd) // die 'dup(): ', $!;
+		$io_handler->{orig_socket} = $socket;
+		Scalar::Util::weaken($io_handler->{orig_socket});
+		$socket = $tmp_socket;
 	}
 	
 	IO::Socket::Socks->new_from_socket(
@@ -194,9 +203,154 @@ sub _connect
 		%$cfg
 	) or return;
 	
-	bless $socket, $ref if $ref; # XXX: should we unbless for GLOB?
+	bless $socket, $ref if $ref && !$io_handler; # XXX: should we unbless for GLOB?
 	
-	return $socket;
+	if ($io_handler) {
+		my ($r_cb, $w_cb); 
+		
+		tie *{$io_handler->{orig_socket}}, 'IO::Socket::Socks::Wrapper::Handle', $io_handler->{orig_socket}, sub {
+			$io_handler->{unset_read_watcher}->($socket);
+			$io_handler->{unset_write_watcher}->($socket);
+			
+			if ($io_handler->{destroy_io_watcher}) {
+				$io_handler->{destroy_io_watcher}->($socket);
+			}
+			
+			close $socket;
+		};
+		
+		my $on_finish = sub {
+			tied(*{$io_handler->{orig_socket}})->handshake_done(1);
+			POSIX::dup2(fileno($socket), fileno($io_handler->{orig_socket})) // die 'dup2(): ', $!;
+			close $socket;
+		};
+		
+		my $on_error = sub {
+			tied(*{$io_handler->{orig_socket}})->handshake_done(1);
+			shutdown($socket, 0);
+			POSIX::dup2(fileno($socket), fileno($io_handler->{orig_socket}))  // die 'dup2(): ', $!;
+			close $socket;
+		};
+		
+		$r_cb = sub {
+			if ($socket->ready) {
+				$io_handler->{unset_read_watcher}->($socket);
+				
+				if ($io_handler->{destroy_io_watcher}) {
+					$io_handler->{destroy_io_watcher}->($socket);
+				}
+				
+				$on_finish->();
+			}
+			elsif ($IO::Socket::Socks::SOCKS_ERROR == &IO::Socket::Socks::SOCKS_WANT_WRITE) {
+				$io_handler->{unset_read_watcher}->($socket);
+				$io_handler->{set_write_watcher}->($socket, $w_cb);
+			}
+			elsif ($IO::Socket::Socks::SOCKS_ERROR != &IO::Socket::Socks::SOCKS_WANT_READ) {
+				$io_handler->{unset_read_watcher}->($socket);
+				
+				if ($io_handler->{destroy_io_watcher}) {
+					$io_handler->{destroy_io_watcher}->($socket);
+				}
+				
+				$on_error->();
+			}
+		};
+		
+		$w_cb = sub {
+			if ($socket->ready) {
+				$io_handler->{unset_write_watcher}->($socket);
+				
+				if ($io_handler->{destroy_io_watcher}) {
+					$io_handler->{destroy_io_watcher}->($socket);
+				}
+				
+				$on_finish->();
+			}
+			elsif ($IO::Socket::Socks::SOCKS_ERROR == &IO::Socket::Socks::SOCKS_WANT_READ) {
+				$io_handler->{unset_write_watcher}->($socket);
+				$io_handler->{set_read_watcher}->($socket, $r_cb);
+			}
+			elsif ($IO::Socket::Socks::SOCKS_ERROR != &IO::Socket::Socks::SOCKS_WANT_WRITE) {
+				$io_handler->{unset_write_watcher}->($socket);
+				
+				if ($io_handler->{destroy_io_watcher}) {
+					$io_handler->{destroy_io_watcher}->($socket);
+				}
+				
+				$on_error->();
+			}
+		};
+		
+		if ($io_handler->{init_io_watcher}) {
+			$io_handler->{init_io_watcher}->($socket, $r_cb, $w_cb);
+		}
+		
+		$io_handler->{set_write_watcher}->($socket, $w_cb);
+	}
+	
+	return 1;
+}
+
+package IO::Socket::Socks::Wrapper::Handle;
+
+use strict;
+
+sub TIEHANDLE {
+	my ($class, $orig_handle, $cleanup_cb) = @_;
+	
+	open my $self, '+<&=' . fileno($orig_handle)
+		or die 'open: ', $!;
+	
+	${*$self}{handshake_done} = 0;
+	${*$self}{cleanup_cb} = $cleanup_cb;
+	
+	bless $self, $class;
+}
+
+sub handshake_done {
+	my $self = shift;
+	
+	if (@_) {
+		${*$self}{handshake_done} = $_[0];
+	}
+	
+	return ${*$self}{handshake_done};
+}
+
+sub READ {
+	my $self = shift;
+	sysread($self, $_[0], $_[1], @_ > 2 ? $_[2] : ());
+}
+
+sub WRITE {
+	my $self = shift;
+	syswrite($self, $_[0], $_[1], @_ > 2 ? $_[2] : ());
+}
+
+sub FILENO {
+	my $self = shift;
+	fileno($self);
+}
+
+sub CLOSE {
+	my $self = shift;
+	
+	unless ($self->handshake_done) {
+		$self->handshake_done(1);
+		${*$self}{cleanup_cb}->();
+	}
+	
+	close $self;
+}
+
+sub DESTROY {
+	my $self = shift;
+	
+	unless ($self->handshake_done) {
+		$self->handshake_done(1);
+		${*$self}{cleanup_cb}->();
+	}
 }
 
 1;
