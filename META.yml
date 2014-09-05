@@ -21,7 +21,7 @@ no_index:
     - t
     - inc
 requires:
-  IO::Socket::Socks: 0.61
+  IO::Socket::Socks: 0.63
 resources:
   repository: https://github.com/olegwtf/p5-IO-Socket-Socks-Wrapper
-version: 0.11_2
+version: 0.11_3
